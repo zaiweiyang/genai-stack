@@ -1,5 +1,5 @@
 import os
-
+import json
 import streamlit as st
 from langchain.chains import RetrievalQA
 from PyPDF2 import PdfReader
@@ -47,42 +47,98 @@ class StreamHandler(BaseCallbackHandler):
 
 llm = load_llm(llm_name, logger=logger, config={"ollama_base_url": ollama_base_url})
 
+# Status file path
+status_file_path = '/app/data/upload_status.json'
+
+# Helper function to load the upload status
+def load_status():
+    if os.path.exists(status_file_path):
+        with open(status_file_path, 'r') as file:
+            return json.load(file)
+    else:
+        return {}
+
+# Helper function to save the upload status
+def save_status(status):
+    with open(status_file_path, 'w') as file:
+        json.dump(status, file)
+
 
 def main():
-    st.header("📄Chat with your pdf file")
+    # st.header("📄Chat with your pdf file")
+    
+    st.header("📄Demo: Generative AI enriched with local data. \n Locally hosted LLM Model and local Knowledge Base generated from PDFs.")
+
+     # Load upload status
+    upload_status = load_status()
 
     # upload a your pdf file
     pdf = st.file_uploader("Upload your PDF", type="pdf")
-
+    
     if pdf is not None:
-        pdf_reader = PdfReader(pdf)
+        if pdf.name in upload_status:
+            st.success("This PDF has already been uploaded.")
+            metadata = upload_status[pdf.name]
+            st.markdown(f"**Title:** {metadata['title']}")
+            st.markdown(f"**Abstract:** {metadata['abstract']}")
+        else:
+            pdf_reader = PdfReader(pdf)
 
-        text = ""
-        for page in pdf_reader.pages:
-            text += page.extract_text()
+            title = pdf_reader.metadata.get('/Title', "No Title Available") if pdf_reader.metadata else "No Metadata Found"
 
-        # langchain_textspliter
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000, chunk_overlap=200, length_function=len
-        )
+            text = ""
+            for page in pdf_reader.pages:
+                text += page.extract_text()
 
-        chunks = text_splitter.split_text(text=text)
+            abstract = text[:500] # Use the first 500 characters as an abstract
 
-        # Store the chunks part in db (vector)
-        vectorstore = Neo4jVector.from_texts(
-            chunks,
+            # langchain_textspliter
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=1000, chunk_overlap=200, length_function=len
+            )
+
+            chunks = text_splitter.split_text(text=text)
+
+            # Store the chunks part in db (vector)
+            vectorstore = Neo4jVector.from_texts(
+                chunks,
+                url=url,
+                username=username,
+                password=password,
+                embedding=embeddings,
+                index_name="pdf_bot",
+                node_label="PdfBotChunk"
+                # pre_delete_collection=True,  # Delete existing PDF data
+            )
+            
+            upload_status[pdf.name] = {"title": title, "abstract": abstract}
+            save_status(upload_status)
+
+            # qa = RetrievalQA.from_chain_type(
+            #     llm=llm, chain_type="stuff", retriever=vectorstore.as_retriever()
+            # )
+
+    upload_status = load_status()
+    if upload_status:
+        st.success("Previously uploaded PDF: " + ', '.join(upload_status.keys()))
+        for pdf_name, info in upload_status.items():
+            st.markdown(f"**{pdf_name}** \n - Title: {info['title']} \n - Abstract: {info['abstract'][:100]}...")
+
+        # Use a separate retriever for queries
+        retriever = Neo4jVector(
             url=url,
             username=username,
             password=password,
             embedding=embeddings,
             index_name="pdf_bot",
             node_label="PdfBotChunk",
-            pre_delete_collection=True,  # Delete existing PDF data
-        )
-        qa = RetrievalQA.from_chain_type(
-            llm=llm, chain_type="stuff", retriever=vectorstore.as_retriever()
-        )
+        ).as_retriever()
 
+        # Setup the QA system
+        qa = RetrievalQA.from_chain_type(
+            llm=llm, chain_type="stuff", retriever=retriever
+        )
+        
         # Accept user questions/query
         query = st.text_input("Ask questions about your PDF file")
 

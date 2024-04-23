@@ -17,3 +17,5 @@ boto3
 langchain-openai
 langchain-community
 langchain-google-genai
+Flask
+requests

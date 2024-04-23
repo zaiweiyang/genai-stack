@@ -1,5 +1,9 @@
 import os
 import json
+import subprocess
+import datetime
+import requests
+
 import streamlit as st
 from langchain.chains import RetrievalQA
 from PyPDF2 import PdfReader
@@ -15,8 +19,10 @@ from chains import (
 # load api key lib
 from dotenv import load_dotenv
 
-load_dotenv(".env")
+# Operation status flag
+operation_in_progress = False
 
+load_dotenv(".env")
 
 url = os.getenv("NEO4J_URI")
 username = os.getenv("NEO4J_USERNAME")
@@ -50,102 +56,145 @@ llm = load_llm(llm_name, logger=logger, config={"ollama_base_url": ollama_base_u
 # Status file path
 status_file_path = '/app/data/upload_status.json'
 
-# Helper function to load the upload status
+def handle_pdf_upload(pdf, upload_status):
+    pdf_reader = PdfReader(pdf)
+    title = pdf_reader.metadata.get('/Title', "No Title Available") if pdf_reader.metadata else "No Metadata Found"
+    text = "".join((page.extract_text() or "") for page in pdf_reader.pages)
+    abstract = text[:500]  # First 500 characters as an abstract
+
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200, length_function=len)
+    chunks = text_splitter.split_text(text=text)
+
+    vectorstore = Neo4jVector.from_texts(
+        chunks,
+        url=url,
+        username=username,
+        password=password,
+        embedding=embeddings,
+        index_name="pdf_bot",
+        node_label="PdfBotChunk"
+    )
+    
+    upload_status[pdf.name] = {"title": title, "abstract": abstract}
+    save_status(upload_status)
+
+def display_uploaded_pdfs(upload_status):
+    st.success("Previously uploaded PDFs:")
+    for pdf_name, info in upload_status.items():
+        st.markdown(f"**{pdf_name}** - Title: {info['title']}, Abstract: {info['abstract'][:100]}...")
+
+def run_qa_section(upload_status):
+    st.header("PDF Query Assistant")
+    # selected_pdf = st.selectbox('Select a PDF to query:', list(upload_status.keys()))
+    # if selected_pdf:
+        # Set up the QA system
+    retriever = Neo4jVector(
+        url=url,
+        username=username,
+        password=password,
+        embedding=embeddings,
+        index_name="pdf_bot",
+        node_label="PdfBotChunk",
+    ).as_retriever()
+
+    qa = RetrievalQA.from_chain_type(
+        llm=llm, chain_type="stuff", retriever=retriever
+    )
+    
+    query = st.text_input("Ask a question:")
+    if query:
+        response = qa.ask(query)
+        st.write(response)
+
 def load_status():
     if os.path.exists(status_file_path):
         with open(status_file_path, 'r') as file:
             return json.load(file)
-    else:
-        return {}
+    return {}
 
-# Helper function to save the upload status
 def save_status(status):
     with open(status_file_path, 'w') as file:
         json.dump(status, file)
 
+def get_backup_tags():
+    try:
+        # Make an HTTP request to the service that can access the backups
+        response = requests.get('http://192.168.31.32:5050/backups')
+        if response.status_code == 200:
+            # Assuming the endpoint returns a JSON array of directory names (tags)
+            backup_tags = response.json()
+            return backup_tags
+        else:
+            print(f"Failed to retrieve backup tags: {response.status_code} {response.text}")
+            return []
+    except Exception as e:
+        print(f"Error retrieving backup tags: {e}")
+        return []
+
+def manage_backups():
+    global operation_in_progress
+    st.header("Database Management")
+    col1, col2 = st.columns(2)
+    
+    # Only enable the input and button if no operation is in progress
+    with col1:
+        tag = st.text_input('Enter a tag for this backup:', key='backup_tag', disabled=operation_in_progress)
+        if st.button('Backup Database', key='backup_button', disabled=operation_in_progress):
+            if not tag:
+                tag = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            response = backup_database(tag)
+            message = response.get('message', 'Backup failed due to an unexpected error.')
+            st.text(message)
+
+    with col2:
+        backup_tags = get_backup_tags()  
+        tag = st.selectbox('Choose a tag to restore from:', backup_tags, key='restore_tag', disabled=operation_in_progress)
+        if st.button('Restore Database', key='restore_button', disabled=operation_in_progress):
+            response = restore_database(tag)
+            message = response.get('message', 'Restore failed due to an unexpected error.')
+            st.text(message)
+
+def backup_database(tag=None):
+    global operation_in_progress
+    operation_in_progress = True
+    data = {"tag": tag} if tag else {}
+    response = requests.post('http://192.168.31.32:5050/backup', json=data)
+    operation_in_progress = False
+    if response.status_code == 200:
+        return response.json()
+    else:
+        return {"message": f"Backup failed with status {response.status_code}: {response.text}"}
+
+def restore_database(tag):
+    global operation_in_progress
+    operation_in_progress = True
+    data = {"tag": tag}
+    response = requests.post('http://192.168.31.32:5050/restore', json=data)
+    operation_in_progress = False
+    if response.status_code == 200:
+        return response.json()
+    else:
+        return {"message": f"Restore failed with status {response.status_code}: {response.text}"}
 
 def main():
-    # st.header("📄Chat with your pdf file")
-    
-    st.header("📄Demo: Generative AI enriched with local data. \n Locally hosted LLM Model and local Knowledge Base generated from PDFs.")
-
-     # Load upload status
-    upload_status = load_status()
-
-    # upload a your pdf file
-    pdf = st.file_uploader("Upload your PDF", type="pdf")
-    
-    if pdf is not None:
-        if pdf.name in upload_status:
-            st.success("This PDF has already been uploaded.")
-            metadata = upload_status[pdf.name]
-            st.markdown(f"**Title:** {metadata['title']}")
-            st.markdown(f"**Abstract:** {metadata['abstract']}")
-        else:
-            pdf_reader = PdfReader(pdf)
-
-            title = pdf_reader.metadata.get('/Title', "No Title Available") if pdf_reader.metadata else "No Metadata Found"
-
-            text = ""
-            for page in pdf_reader.pages:
-                text += page.extract_text()
-
-            abstract = text[:500] # Use the first 500 characters as an abstract
-
-            # langchain_textspliter
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1000, chunk_overlap=200, length_function=len
-            )
-
-            chunks = text_splitter.split_text(text=text)
-
-            # Store the chunks part in db (vector)
-            vectorstore = Neo4jVector.from_texts(
-                chunks,
-                url=url,
-                username=username,
-                password=password,
-                embedding=embeddings,
-                index_name="pdf_bot",
-                node_label="PdfBotChunk"
-                # pre_delete_collection=True,  # Delete existing PDF data
-            )
-            
-            upload_status[pdf.name] = {"title": title, "abstract": abstract}
-            save_status(upload_status)
-
-            # qa = RetrievalQA.from_chain_type(
-            #     llm=llm, chain_type="stuff", retriever=vectorstore.as_retriever()
-            # )
+    st.header("📄Demo: Generative AI enriched with local data. \nLocally hosted LLM Model and local Knowledge Base generated from PDFs.")
 
     upload_status = load_status()
+
+    # Disable the uploader during the backup/restore operations
+    if not operation_in_progress:
+        pdf = st.file_uploader("Upload your PDF", type="pdf")
+        if pdf and pdf.name not in upload_status:
+            handle_pdf_upload(pdf, upload_status)
+    
     if upload_status:
-        st.success("Previously uploaded PDF: " + ', '.join(upload_status.keys()))
-        for pdf_name, info in upload_status.items():
-            st.markdown(f"**{pdf_name}** \n - Title: {info['title']} \n - Abstract: {info['abstract'][:100]}...")
+        display_uploaded_pdfs(upload_status)
 
-        # Use a separate retriever for queries
-        retriever = Neo4jVector(
-            url=url,
-            username=username,
-            password=password,
-            embedding=embeddings,
-            index_name="pdf_bot",
-            node_label="PdfBotChunk",
-        ).as_retriever()
-
-        # Setup the QA system
-        qa = RetrievalQA.from_chain_type(
-            llm=llm, chain_type="stuff", retriever=retriever
-        )
-        
-        # Accept user questions/query
-        query = st.text_input("Ask questions about your PDF file")
-
-        if query:
-            stream_handler = StreamHandler(st.empty())
-            qa.run(query, callbacks=[stream_handler])
-
+    # Disable the QA section during the backup/restore operations
+    if not operation_in_progress:
+        run_qa_section(upload_status) 
+    
+    manage_backups()
 
 if __name__ == "__main__":
     main()

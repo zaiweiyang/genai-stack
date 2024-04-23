@@ -3,4 +3,5 @@
 !requirements.txt
 !images/*
 !front-end/*
+!scripts/*
 front-end/node_modules/*

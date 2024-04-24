@@ -30,6 +30,8 @@ password = os.getenv("NEO4J_PASSWORD")
 ollama_base_url = os.getenv("OLLAMA_BASE_URL")
 embedding_model_name = os.getenv("EMBEDDING_MODEL")
 llm_name = os.getenv("LLM")
+backup_api_svc_url = os.getenv("BACKUP_API_SVC_URL")
+
 # Remapping for Langchain Neo4j integration
 os.environ["NEO4J_URL"] = url
 
@@ -79,9 +81,9 @@ def handle_pdf_upload(pdf, upload_status):
     save_status(upload_status)
 
 def display_uploaded_pdfs(upload_status):
-    st.success("Previously uploaded PDFs:")
+    st.subheader("Previously uploaded PDFs:")
     for pdf_name, info in upload_status.items():
-        st.markdown(f"**{pdf_name}** - Title: {info['title']}, Abstract: {info['abstract'][:100]}...")
+        st.markdown(f"**{pdf_name}**\n - Title: {info['title']}\n - Abstract: {info['abstract'][:150]}...\n")
 
 def run_qa_section(upload_status):
     st.header("PDF Query Assistant")
@@ -119,7 +121,8 @@ def save_status(status):
 def get_backup_tags():
     try:
         # Make an HTTP request to the service that can access the backups
-        response = requests.get('http://192.168.31.32:5050/backups')
+        # response = requests.get('http://192.168.31.32:5050/backups')
+        response = requests.get(f'{backup_api_svc_url}/backups')
         if response.status_code == 200:
             # Assuming the endpoint returns a JSON array of directory names (tags)
             backup_tags = response.json()
@@ -138,7 +141,7 @@ def manage_backups():
     
     # Only enable the input and button if no operation is in progress
     with col1:
-        tag = st.text_input('Enter a tag for this backup:', key='backup_tag', disabled=operation_in_progress)
+        tag = st.text_input('Enter a tag for this backup(optional):', key='backup_tag', disabled=operation_in_progress)
         if st.button('Backup Database', key='backup_button', disabled=operation_in_progress):
             if not tag:
                 tag = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -158,7 +161,9 @@ def backup_database(tag=None):
     global operation_in_progress
     operation_in_progress = True
     data = {"tag": tag} if tag else {}
-    response = requests.post('http://192.168.31.32:5050/backup', json=data)
+    # response = requests.post('http://192.168.31.32:5050/backup', json=data)
+    response = requests.post(f'{backup_api_svc_url}/backup', json=data)
+
     operation_in_progress = False
     if response.status_code == 200:
         return response.json()
@@ -169,7 +174,7 @@ def restore_database(tag):
     global operation_in_progress
     operation_in_progress = True
     data = {"tag": tag}
-    response = requests.post('http://192.168.31.32:5050/restore', json=data)
+    response = requests.post(f'{backup_api_svc_url}/restore', json=data)
     operation_in_progress = False
     if response.status_code == 200:
         return response.json()
@@ -177,24 +182,34 @@ def restore_database(tag):
         return {"message": f"Restore failed with status {response.status_code}: {response.text}"}
 
 def main():
+    st.set_page_config(layout="wide")
+
     st.header("📄Demo: Generative AI enriched with local data. \nLocally hosted LLM Model and local Knowledge Base generated from PDFs.")
 
     upload_status = load_status()
 
-    # Disable the uploader during the backup/restore operations
-    if not operation_in_progress:
-        pdf = st.file_uploader("Upload your PDF", type="pdf")
-        if pdf and pdf.name not in upload_status:
-            handle_pdf_upload(pdf, upload_status)
-    
-    if upload_status:
-        display_uploaded_pdfs(upload_status)
+    col1, col2 = st.columns([3, 1])  # Adjust the ratio as needed
 
-    # Disable the QA section during the backup/restore operations
-    if not operation_in_progress:
-        run_qa_section(upload_status) 
-    
-    manage_backups()
+    with col1:
+        # Disable the uploader during the backup/restore operations
+        if not operation_in_progress:
+            pdf = st.file_uploader("Upload your PDF", type="pdf")
+            if pdf and pdf.name not in upload_status:
+                handle_pdf_upload(pdf, upload_status)
+
+        if upload_status:       
+            st.success("Uploaded PDFs: " + ', '.join(upload_status.keys()))
+
+        # Disable the QA section during the backup/restore operations
+        if not operation_in_progress:
+            run_qa_section(upload_status) 
+        
+        manage_backups()
+
+    with col2:
+        # st.subheader("Previously uploaded PDFs:")
+        if upload_status:
+            display_uploaded_pdfs(upload_status)
 
 if __name__ == "__main__":
     main()

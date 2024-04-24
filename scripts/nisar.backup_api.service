@@ -1,0 +1,15 @@
+[Unit]
+Description=Backup API Service
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/src/genai-stack
+ExecStart=/usr/bin/python3 /home/ubuntu/src/genai-stack/backup_api_svc.py
+EnvironmentFile=/home/ubuntu/src/genai-stack/.env
+Restart=on-failure
+RestartSec=30s
+
+[Install]
+WantedBy=multi-user.target

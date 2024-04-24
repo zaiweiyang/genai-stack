@@ -1,4 +1,5 @@
-# import os
+#  run "sudo /usr/bin/python3 -m pip install Flask" if install this python code as systemd service
+
 from flask import Flask, request, jsonify
 import subprocess
 import datetime

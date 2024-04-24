@@ -159,6 +159,7 @@ services:
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+      - BACKUP_API_SVC_URL=http://192.168.31.32:5050
     networks:
       - net
     depends_on:

@@ -105,8 +105,8 @@ def run_qa_section(upload_status):
     
     query = st.text_input("Ask a question:")
     if query:
-        response = qa.ask(query)
-        st.write(response)
+        stream_handler = StreamHandler(st.empty())
+        qa.run(query, callbacks=[stream_handler])
 
 def load_status():
     if os.path.exists(status_file_path):

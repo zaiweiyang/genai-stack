@@ -19,3 +19,5 @@ langchain-community
 langchain-google-genai
 Flask
 requests
+langchain-chroma
+chroma

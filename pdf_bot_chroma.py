@@ -178,6 +178,7 @@ def get_backup_tags():
     try:
         # Make an HTTP request to the service that can access the backups
         # response = requests.get('http://192.168.31.32:5050/backups')
+        # logger.info(f"backup_api_svc_url: {backup_api_svc_url}")
         response = requests.get(f'{backup_api_svc_url}/backups')
         if response.status_code == 200:
             # Assuming the endpoint returns a JSON array of directory names (tags)
@@ -255,9 +256,9 @@ def main():
         save_to_neo4j = True
         db_col1, db_col2 = st.columns([1, 1])  
         with db_col1:
-            save_to_chroma = st.checkbox("Save to Chroma Vector Database", value=True)
-        with db_col2:
             save_to_neo4j = st.checkbox("Save to Neo4j Graph Database", value=True)
+        with db_col2:
+            save_to_chroma = st.checkbox("Save to Chroma Vector Database", value=True)
         
         # Disable the uploader during the backup/restore operations
         if not operation_in_progress:

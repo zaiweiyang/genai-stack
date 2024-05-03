@@ -3,3 +3,7 @@ data/
 embedding_model/*
 !embedding_model/.ignore
 .DS_Store
+app_data/
+app_data_backups/
+chroma-data/
+backups/

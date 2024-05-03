@@ -165,6 +165,8 @@ services:
     volumes:
       - $PWD/app_data:/app/data
       - $PWD/app_data_backups:/app/data/backups
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - NEO4J_URI=${NEO4J_URI-neo4j://database:7687}
       - NEO4J_PASSWORD=${NEO4J_PASSWORD-password}
@@ -181,7 +183,7 @@ services:
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
-      - BACKUP_API_SVC_URL=http://192.168.31.32:5050
+      - BACKUP_API_SVC_URL=${BACKUP_API_SVC_URL-http://host.docker.internal:5050}
     networks:
       - net
     depends_on:

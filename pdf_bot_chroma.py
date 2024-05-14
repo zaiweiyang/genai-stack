@@ -5,6 +5,8 @@ import json
 import subprocess
 import datetime
 import requests
+import threading
+import concurrent.futures
 
 import streamlit as st
 from langchain.chains import RetrievalQA
@@ -12,6 +14,7 @@ from PyPDF2 import PdfReader
 from langchain.callbacks.base import BaseCallbackHandler
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Neo4jVector
+from langchain.schema.document import Document
 
 from streamlit.logger import get_logger
 from chains import (
@@ -21,6 +24,7 @@ from chains import (
 
 # load api key lib
 from dotenv import load_dotenv
+# from custom_widgets.layout import Accordion
 
 # from langchain.vectorstores import Chroma
 from langchain_community.vectorstores import  Chroma
@@ -48,15 +52,49 @@ embeddings, dimension = load_embedding_model(
     embedding_model_name, config={"ollama_base_url": ollama_base_url}, logger=logger
 )
 
+class Accordion:
+    def __init__(self, label):
+        self.label = label
+        self.content = ""
+        self.container = st.empty()
+
+    def markdown(self, text):
+        self.content = text
+        self.update()
+
+    def update(self):
+        with self.container.expander(self.label, expanded=True):
+            st.markdown(self.content)
+
 
 class StreamHandler(BaseCallbackHandler):
-    def __init__(self, container, initial_text=""):
+    def __init__(self, container, name):
         self.container = container
-        self.text = initial_text
+        self.name = name
+        self.text = ""
+        self.lock = threading.Lock()
+        self.llm_accordion = Accordion(label=f"**{name} LLM Answer**")
+        self.retriever_accordion = Accordion(label=f"**{name} Retriever Output**")
+        self.retriever_text = ""
+        self.llm_accordion.update()
+        self.retriever_accordion.update()
 
     def on_llm_new_token(self, token: str, **kwargs) -> None:
-        self.text += token
-        self.container.markdown(self.text)
+        with self.lock:
+            self.text += token
+            self.llm_accordion.markdown(self.text)
+        # st.write(f"{self.name} on_llm_new_token called with token: {token}")
+
+    def on_retriever_end(self, documents, **kwargs):
+        with self.lock:
+            document_detail = ""
+            for idx, doc in enumerate(documents):
+                self.retriever_text += f"\n\n**Results from Document[{idx}]:**\n\n"
+                self.retriever_text += doc.page_content
+                document_detail += json.dumps(doc.metadata, indent=2) 
+                self.retriever_accordion.markdown(self.retriever_text)
+        # st.write(f"{self.name} on_retriever_end called with documents: {documents}")
+        # st.write(f"{self.name} retriever document details: {document_detail}")
 
 
 llm = load_llm(llm_name, logger=logger, config={"ollama_base_url": ollama_base_url})
@@ -140,25 +178,54 @@ def run_qa_section(upload_status):
         qa_chroma_selected = st.checkbox("Query against Chroma Vector Database", value=True)
 
     query = st.text_input("Ask a question:")
+    # logging.info ("query input:{query}")
     if query:
         if qa_neo4j_selected and qa_chroma_selected: 
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown("### Neo4j Database Response")
-                stream_handler_neo4j = StreamHandler(st.empty())
-                qa_neo4j.run(query, callbacks=[stream_handler_neo4j])
+                stream_handler_neo4j = StreamHandler(st.empty(), "Neo4j")
+                result = qa_neo4j.run(query, callbacks=[stream_handler_neo4j])
+                # st.markdown(f"### LLM Output:")
+                # stream_handler_neo4j.llm_accordion.display()
+                # st.markdown(f"### Retriever Output:")
+                # stream_handler_neo4j.retriever_accordion.display()
             with col2:
                 st.markdown("### Chroma Database Response")
-                stream_handler_chroma = StreamHandler(st.empty())
-                qa_chroma.run(query, callbacks=[stream_handler_chroma])
+                stream_handler_chroma = StreamHandler(st.empty(), "Chroma")
+                result = qa_chroma.run(query, callbacks=[stream_handler_chroma])
+                # st.write(f"Chroma result: {result}")
+
+            # def run_neo4j():
+            #     stream_handler_neo4j = StreamHandler(st.empty(), "Neo4j")
+            #     result = qa_neo4j.run(query, callbacks=[stream_handler_neo4j])
+            #     # st.write(f"Neo4j result: {result}")
+            #     return stream_handler_neo4j
+
+            # def run_chroma():
+            #     stream_handler_chroma = StreamHandler(st.empty(), "Chroma")
+            #     result = qa_chroma.run(query, callbacks=[stream_handler_chroma])
+            #     # st.write(f"Chroma result: {result}")
+            #     return stream_handler_chroma
+
+            # with concurrent.futures.ThreadPoolExecutor() as executor:
+            #     futures = {
+            #         executor.submit(run_neo4j): "Neo4j",
+            #         executor.submit(run_chroma): "Chroma"
+            #     }
+            #     results = {name: future.result() for future, name in futures.items()}
+            #     # for future in concurrent.futures.as_completed(futures):
+            #     #     future.result()
+
         elif qa_neo4j_selected:
             st.markdown("### Neo4j Database Response")
-            stream_handler_neo4j = StreamHandler(st.empty())
-            qa_neo4j.run(query, callbacks=[stream_handler_neo4j])
+            stream_handler_neo4j = StreamHandler(st.empty(), "Neo4j")
+            result = qa_neo4j.run(query, callbacks=[stream_handler_neo4j])
         elif qa_chroma_selected:
             st.markdown("### Chroma Database Response")
-            stream_handler_chroma = StreamHandler(st.empty())
-            qa_chroma.run(query, callbacks=[stream_handler_chroma])
+            stream_handler_chroma = StreamHandler(st.empty(), "Chroma")
+            result = qa_chroma.run(query, callbacks=[stream_handler_chroma])
+            # st.write(f"Chroma result: {result}")
         else:
             st.markdown("### No Database is selected for the query")
 

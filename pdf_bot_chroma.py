@@ -67,25 +67,6 @@ class Accordion:
         with self.container.expander(self.label, expanded=self.expanded):
             st.markdown(self.content)
 
-# class StreamHandler(BaseCallbackHandler):
-#     def __init__(self, name):
-#         self.name = name
-#         self.text = ""
-#         self.retriever_text = ""
-#         self.llm_accordion = Accordion(label=f"{name} LLM Output")
-#         self.retriever_accordion = Accordion(label=f"{name} Retriever Output")
-
-#     def on_llm_new_token(self, token: str, **kwargs) -> None:
-#         self.text += token
-#         self.llm_accordion.markdown(self.text)
-
-#     def on_retriever_end(self, documents, **kwargs):
-#         document_detail = ""
-#         for idx, doc in enumerate(documents):
-#             self.retriever_text += f"\n\n**Results from Document[{idx}]:**\n\n"
-#             self.retriever_text += doc.page_content
-#             document_detail += json.dumps(doc.metadata, indent=2)
-#         self.retriever_accordion.markdown(self.retriever_text)
 class StreamHandler(BaseCallbackHandler):
     def __init__(self, container, name):
         self.container = container
@@ -97,12 +78,12 @@ class StreamHandler(BaseCallbackHandler):
         self.retriever_text = ""
         self.llm_accordion.update()
         self.retriever_accordion.update()
+        self.chain_text = ""
 
     def on_llm_new_token(self, token: str, **kwargs) -> None:
         with self.lock:
             self.text += token
             self.llm_accordion.markdown(self.text)
-        # st.write(f"{self.name} on_llm_new_token called with token: {token}")
 
     def on_retriever_end(self, documents, **kwargs):
         with self.lock:
@@ -114,6 +95,20 @@ class StreamHandler(BaseCallbackHandler):
                 self.retriever_accordion.markdown(self.retriever_text)
         # st.write(f"{self.name} on_retriever_end called with documents: {documents}")
         # st.write(f"{self.name} retriever document details: {document_detail}")
+    # def on_chain_start(self, serialized, inputs, **kwargs):
+    #     st.write(f"on_chain_start: {serialized} {inputs}")
+    # def on_chat_model_end(self, messages, **kwargs):
+    #     with self.lock:
+    #         for message in messages:
+    #             strMessage = f"message: {str(message)}"
+    #             self.retriever_accordion.markdown(strMessage)
+
+    def on_chain_end(self, outputs, **kwargs):
+        with self.lock:
+            if self.retriever_text == "":
+                self.chain_text +=json.dumps(outputs, indent=2) 
+                self.chain_text +=f"\n\n"
+                self.retriever_accordion.markdown(self.chain_text)
 
 llm = load_llm(llm_name, logger=logger, config={"ollama_base_url": ollama_base_url})
 
@@ -159,91 +154,6 @@ def display_uploaded_pdfs(upload_status):
     for pdf_name, info in upload_status.items():
         uploaded_to = ', '.join(set(info.get('uploaded_to', ['Neo4j']))) 
         st.markdown(f"**{pdf_name}** - Title: {info['title']}, Abstract: {info['abstract'][:150]}... (Uploaded to: {uploaded_to})")
-
-# def run_qa_section(upload_status):
-#     st.header("PDF Query Assistant")
-    
-#     col1, col2 = st.columns(2)
-
-#     chroma_retriever = Chroma(
-#         collection_name="pdf_bot",
-#         embedding_function=embeddings
-#     ).as_retriever()
-
-#     qa_chroma = RetrievalQA.from_chain_type(
-#         llm=llm, chain_type="stuff", retriever=chroma_retriever
-#     )
-    
-#     neo4j_retriever = Neo4jVector(
-#         url=url,
-#         username=username,
-#         password=password,
-#         embedding=embeddings,
-#         index_name="pdf_bot",
-#         node_label="PdfBotChunk"
-#     ).as_retriever()
-#     qa_neo4j = RetrievalQA.from_chain_type(
-#         llm=llm, chain_type="stuff", retriever=neo4j_retriever
-#     )
-
-#     db_col1, db_col2 = st.columns(2)
-#     qa_neo4j_selected = True
-#     qa_chroma_selected = True
-#     with db_col1:
-#         qa_neo4j_selected = st.checkbox("Query against Neo4j Graph Database", value=True)
-#     with db_col2:
-#         qa_chroma_selected = st.checkbox("Query against Chroma Vector Database", value=True)
-
-#     query = st.text_input("Ask a question:")
-#     if query:
-#         st.write(f"Running query: {query}")
-#         if qa_neo4j_selected and qa_chroma_selected:
-#             col1, col2 = st.columns(2)
-#             with col1:
-#                 st.markdown("### Neo4j Database Response")
-#             with col2:
-#                 st.markdown("### Chroma Database Response")
-
-#             def run_neo4j():
-#                 stream_handler_neo4j = StreamHandler("Neo4j")
-#                 qa_neo4j.run(query, callbacks=[stream_handler_neo4j])
-#                 return stream_handler_neo4j
-
-#             def run_chroma():
-#                 stream_handler_chroma = StreamHandler("Chroma")
-#                 qa_chroma.run(query, callbacks=[stream_handler_chroma])
-#                 return stream_handler_chroma
-
-#             with concurrent.futures.ThreadPoolExecutor() as executor:
-#                 future_to_handler = {
-#                     executor.submit(run_neo4j): "Neo4j",
-#                     executor.submit(run_chroma): "Chroma"
-#                 }
-
-#                 results = {}
-#                 for future in concurrent.futures.as_completed(future_to_handler):
-#                     handler_name = future_to_handler[future]
-#                     try:
-#                         handler = future.result()
-#                         results[handler_name] = handler
-#                     except Exception as exc:
-#                         st.error(f'{handler_name} generated an exception: {exc}')
-
-#             # Update the Streamlit UI in the main thread
-#             col1.markdown(results["Neo4j"].retriever_accordion.content)
-#             col2.markdown(results["Chroma"].retriever_accordion.content)
-#         elif qa_neo4j_selected:
-#             st.markdown("### Neo4j Database Response")
-#             stream_handler_neo4j = StreamHandler("Neo4j")
-#             result = qa_neo4j.run(query, callbacks=[stream_handler_neo4j])
-#             st.write(f"Neo4j result: {result}")
-#         elif qa_chroma_selected:
-#             st.markdown("### Chroma Database Response")
-#             stream_handler_chroma = StreamHandler("Chroma")
-#             result = qa_chroma.run(query, callbacks=[stream_handler_chroma])
-#             st.write(f"Chroma result: {result}")
-#         else:
-#             st.markdown("### No Database is selected for the query")
 
 def run_qa_section(upload_status):
     st.header("PDF Query Assistant")

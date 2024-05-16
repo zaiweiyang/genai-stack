@@ -1,0 +1,17 @@
+[Unit]
+Description=Docker Compose Application Service
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/src/phoenix/
+ExecStart=/usr/bin/docker compose up
+ExecStop=/usr/bin/docker compose down
+Restart=always
+Restart=on-failure
+RestartSec=30s
+
+[Install]
+WantedBy=multi-user.target

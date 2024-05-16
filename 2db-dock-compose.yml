@@ -184,6 +184,7 @@ services:
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
       - BACKUP_API_SVC_URL=${BACKUP_API_SVC_URL-http://host.docker.internal:5050}
+      - PHOENIX_COLLECTOR_ENDPOINT=${PHOENIX_COLLECTOR_ENDPOINT-http://host.docker.internal:6006}
     networks:
       - net
     depends_on:
@@ -202,7 +203,30 @@ services:
             - front-end/
     ports:
       - 8503:8503
-    
+  
+  # phoenix:
+  #   build:
+  #     context: https://github.com/Arize-ai/phoenix.git
+  #     dockerfile: Dockerfile
+  #   depends_on:
+  #     - postgres_db
+  #   ports:
+  #     - 6006:6006
+  #     - 4317:4317
+  #   environment:
+  #     - PHOENIX_SQL_DATABASE_URL=postgresql://postgres:postgres@db:5432/postgres
+  # postgres_db:
+  #   image: postgres
+  #   restart: always
+  #   environment:
+  #     - POSTGRES_USER=postgres
+  #     - POSTGRES_PASSWORD=postgres
+  #     - POSTGRES_DB=postgres
+  #   ports:
+  #     - 5432
+  #   volumes:
+  #     - database_data:/var/lib/postgresql/data
+
   api:
     build:
       context: .
@@ -272,3 +296,7 @@ services:
     
 networks:
   net:
+
+# volumes:
+#   database_data:
+#     driver: local

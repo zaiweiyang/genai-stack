@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 
 RUN pip install --upgrade -r requirements.txt
+RUN pip install arize-phoenix[evals]
 
 COPY pdf_bot_chroma.py .
 COPY utils.py .

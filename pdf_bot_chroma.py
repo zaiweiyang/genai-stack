@@ -9,18 +9,24 @@ import threading
 import concurrent.futures
 
 import streamlit as st
-from langchain.chains import RetrievalQA
+from langchain.chains import RetrievalQA 
 from PyPDF2 import PdfReader
 from langchain.callbacks.base import BaseCallbackHandler
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Neo4jVector
 from langchain.schema.document import Document
+from langchain_core.runnables import RunnableConfig
 
 from streamlit.logger import get_logger
 from chains import (
     load_embedding_model,
     load_llm,
 )
+
+import phoenix as px
+from phoenix.trace.langchain import LangChainInstrumentor
+# session = px.launch_app()
+# set_global_handler("arize_phoenix")
 
 # load api key lib
 from dotenv import load_dotenv
@@ -41,9 +47,16 @@ ollama_base_url = os.getenv("OLLAMA_BASE_URL")
 embedding_model_name = os.getenv("EMBEDDING_MODEL")
 llm_name = os.getenv("LLM")
 backup_api_svc_url = os.getenv("BACKUP_API_SVC_URL")
+phoenix_tracing_endpoint = os.getenv("PHOENIX_COLLECTOR_ENDPOINT")
 
 # Remapping for Langchain Neo4j integration
 os.environ["NEO4J_URL"] = url
+
+#### PHOENIX Endpoint should be configured via environment variables `PHOENIX_HOST`, `PHOENIX_PORT`, or `PHOENIX_COLLECTOR_ENDPOINT`.
+# os.environ["PHOENIX_PORT"] = "6006"
+# os.environ["PHOENIX_HOST"] = "192.168.31.32"
+os.environ["PHOENIX_COLLECTOR_ENDPOINT"] = phoenix_tracing_endpoint
+LangChainInstrumentor().instrument()
 
 logger = get_logger(__name__)
 
@@ -160,7 +173,6 @@ def run_qa_section(upload_status):
     
     col1, col2 = st.columns(2)
 
-
     chroma_retriever = Chroma(
         collection_name="pdf_bot",
         embedding_function=embeddings
@@ -169,6 +181,14 @@ def run_qa_section(upload_status):
     qa_chroma = RetrievalQA.from_chain_type(
         llm=llm, chain_type="stuff", retriever=chroma_retriever
     )
+    # chroma_db = Chroma(
+    #     collection_name="pdf_bot",
+    #     embedding_function=embeddings
+    # )
+
+    # qa_chroma = VectorDBQA.from_chain_type(
+    #     llm=llm, chain_type="stuff", vectorstore=chroma_db
+    # )
     
     neo4j_retriever = Neo4jVector(
         url=url,
@@ -193,12 +213,15 @@ def run_qa_section(upload_status):
     query = st.text_input("Ask a question:")
     # logging.info ("query input:{query}")
     if query:
+        query_dict = {"query": query}
         if qa_neo4j_selected and qa_chroma_selected: 
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown("### Neo4j Database Response")
                 stream_handler_neo4j = StreamHandler(st.empty(), "Neo4j")
-                result = qa_neo4j.run(query, callbacks=[stream_handler_neo4j])
+                config = RunnableConfig({"callbacks": [stream_handler_neo4j],"run_name":"Neo4j"})
+                # result = qa_neo4j.run(query, callbacks=[stream_handler_neo4j])
+                result = qa_neo4j.invoke(query_dict, config=config)
                 # st.markdown(f"### LLM Output:")
                 # stream_handler_neo4j.llm_accordion.display()
                 # st.markdown(f"### Retriever Output:")
@@ -206,17 +229,23 @@ def run_qa_section(upload_status):
             with col2:
                 st.markdown("### Chroma Database Response")
                 stream_handler_chroma = StreamHandler(st.empty(), "Chroma")
-                result = qa_chroma.run(query, callbacks=[stream_handler_chroma])
+                config = RunnableConfig({"callbacks": [stream_handler_chroma],"run_name":"Chroma"})
+                # result = qa_chroma.run(query, callbacks=[stream_handler_chroma])
+                result = qa_chroma.invoke(query_dict, config=config)
                 # st.write(f"Chroma result: {result}")
 
         elif qa_neo4j_selected:
             st.markdown("### Neo4j Database Response")
             stream_handler_neo4j = StreamHandler(st.empty(), "Neo4j")
-            result = qa_neo4j.run(query, callbacks=[stream_handler_neo4j])
+            config = RunnableConfig({"callbacks": [stream_handler_neo4j],"run_name":"Neo4j"})
+            # result = qa_neo4j.run(query, callbacks=[stream_handler_neo4j])
+            result = qa_neo4j.invoke(query_dict, config=config)
         elif qa_chroma_selected:
             st.markdown("### Chroma Database Response")
             stream_handler_chroma = StreamHandler(st.empty(), "Chroma")
-            result = qa_chroma.run(query, callbacks=[stream_handler_chroma])
+            config = RunnableConfig({"callbacks": [stream_handler_chroma],"run_name":"Chroma"})
+            # result = qa_chroma.run(query, callbacks=[stream_handler_chroma])
+            result = qa_chroma.invoke(query_dict, config=config)
             # st.write(f"Chroma result: {result}")
         else:
             st.markdown("### No Database is selected for the query")
@@ -332,6 +361,8 @@ def main():
         if not operation_in_progress:
             run_qa_section(upload_status) 
         
+        st.markdown(f"### [Tracing the execution]({phoenix_tracing_endpoint})")
+
         manage_backups()
 
     with col2:

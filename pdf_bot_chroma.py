@@ -35,6 +35,9 @@ from dotenv import load_dotenv
 # from langchain.vectorstores import Chroma
 from langchain_community.vectorstores import  Chroma
 
+import uuid
+NAMESPACE_UUID = uuid.uuid4()
+
 # Operation status flag
 operation_in_progress = False
 
@@ -132,29 +135,41 @@ def handle_pdf_upload(pdf, upload_status, save_to_chroma, save_to_neo4j):
     pdf_reader = PdfReader(pdf)
     title = pdf_reader.metadata.get('/Title', "No Title Available") if pdf_reader.metadata else "No Metadata Found"
     # number_of_pages = len(pdf_reader.pages)
+
     text = "".join((page.extract_text() or "") for page in pdf_reader.pages)
     abstract = text[:500]  # First 500 characters as an abstract
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200, length_function=len)
     chunks = text_splitter.split_text(text=text)
-
+    logger.info(f"{len(chunks)} chunks are generated from the pdf <{pdf.name}>.")
+        
     if pdf.name not in upload_status:
         upload_status[pdf.name] = {"title": title, "abstract": abstract, "uploaded_to": []}
 
+    ids = [str(uuid.uuid5(NAMESPACE_UUID, chunk)) for chunk in chunks]
+    unique_ids = list(set(ids))
+    # Ensure that only chunks that correspond to unique ids are kept and that only one of the duplicate ids is kept
+    seen_ids = set()
+    unique_chunks = [chunk for chunk, id in zip(chunks, ids) if id not in seen_ids and (seen_ids.add(id) or True)]
+
     if save_to_chroma:
-        chroma_db = Chroma(persist_directory="/data", embedding_function=embeddings, collection_name="pdf_bot")
-        collection = chroma_db.get()
-        if len(collection['ids']) == 0:
-            chroma_db = Chroma.from_texts(texts=chunks, embedding=embeddings, persist_directory="/data", collection_name="pdf_bot")
-            chroma_db.persist()
-            upload_status[pdf.name]['uploaded_to'].append('Chroma')
+        logger.info(f"{len(unique_chunks)} unique chunks saved to Chroma")
+        # logger.info(f"{len(unique_chunks)} unique chunks saved to chroma: <{unique_chunks}>.")
+        chroma_db = Chroma.from_texts(texts=unique_chunks, embedding=embeddings,ids=unique_ids, persist_directory="/data", collection_name="pdf_bot")
+        chroma_db.persist()
+        # collection = chroma_db.get()
+        # logger.info(f"chroma_db collection length:{len(collection['ids'])}")
+        # if len(collection['ids']) == 0:
+        upload_status[pdf.name]['uploaded_to'].append('Chroma')
 
     if save_to_neo4j:
+        logger.info(f"{len(unique_chunks)} unique chunks saved to Neo4j")
         vectorstore = Neo4jVector.from_texts(
             chunks,
             url=url,
             username=username,
             password=password,
             embedding=embeddings,
+            ids=unique_ids,
             index_name="pdf_bot",
             node_label="PdfBotChunk"
         )
@@ -173,13 +188,25 @@ def run_qa_section(upload_status):
     
     col1, col2 = st.columns(2)
 
-    chroma_retriever = Chroma(
+    chroma_db = Chroma(
+        persist_directory="/data", 
         collection_name="pdf_bot",
         embedding_function=embeddings
-    ).as_retriever()
+    )
+    # collection = chroma_db.get()
+    # logger.info(f"chroma_db collection keys:{collection.keys()}")
+    # logger.info(f"chroma_db collection length:{len(collection['ids'])}")
+    # # Print the list of source files
+    # for x in range(len(collection['ids'])):
+    #     # print(db.get()["metadatas"][x])
+    #     doc = collection["metadatas"][x]
+    #     # source = doc["source"]
+    #     logger.info(f"index {x}, doc {doc}")
+
+    chroma_retriever = chroma_db.as_retriever(search_kwargs={"k": 6})
 
     qa_chroma = RetrievalQA.from_chain_type(
-        llm=llm, chain_type="stuff", retriever=chroma_retriever
+        llm=llm, chain_type="stuff", retriever=chroma_retriever, return_source_documents=True
     )
     # chroma_db = Chroma(
     #     collection_name="pdf_bot",
@@ -222,10 +249,6 @@ def run_qa_section(upload_status):
                 config = RunnableConfig({"callbacks": [stream_handler_neo4j],"run_name":"Neo4j"})
                 # result = qa_neo4j.run(query, callbacks=[stream_handler_neo4j])
                 result = qa_neo4j.invoke(query_dict, config=config)
-                # st.markdown(f"### LLM Output:")
-                # stream_handler_neo4j.llm_accordion.display()
-                # st.markdown(f"### Retriever Output:")
-                # stream_handler_neo4j.retriever_accordion.display()
             with col2:
                 st.markdown("### Chroma Database Response")
                 stream_handler_chroma = StreamHandler(st.empty(), "Chroma")

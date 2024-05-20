@@ -30,10 +30,10 @@ services:
     tty: true
 
   database:
+    user: ${USER_ID}:${GROUP_ID}
     build:
       context: .
       dockerfile: neo4j.Dockerfile
-    user: ${USER_ID}:${GROUP_ID}
     ports:
       - 7687:7687
       - 7474:7474
@@ -41,7 +41,7 @@ services:
       - $PWD/data:/data
       - $PWD/backups:/backups
     environment:
-      - NEO4J_AUTH=${NEO4J_USERNAME-neo4j}/${NEO4J_PASSWORD-password}
+      - NEO4J_AUTH=neo4j/password
       - NEO4J_PLUGINS=["apoc"]
       - NEO4J_db_tx__log_rotation_retention__policy=false
       - NEO4J_dbms_security_procedures_unrestricted=apoc.*
@@ -164,7 +164,7 @@ services:
       dockerfile: pdf_bot_chroma.Dockerfile
     volumes:
       - $PWD/app_data:/app/data
-      - $PWD/app_data_backups:/app/data/backups
+      - $PWD/app_data_backups:/app/data_backups
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -203,29 +203,6 @@ services:
             - front-end/
     ports:
       - 8503:8503
-  
-  # phoenix:
-  #   build:
-  #     context: https://github.com/Arize-ai/phoenix.git
-  #     dockerfile: Dockerfile
-  #   depends_on:
-  #     - postgres_db
-  #   ports:
-  #     - 6006:6006
-  #     - 4317:4317
-  #   environment:
-  #     - PHOENIX_SQL_DATABASE_URL=postgresql://postgres:postgres@db:5432/postgres
-  # postgres_db:
-  #   image: postgres
-  #   restart: always
-  #   environment:
-  #     - POSTGRES_USER=postgres
-  #     - POSTGRES_PASSWORD=postgres
-  #     - POSTGRES_DB=postgres
-  #   ports:
-  #     - 5432
-  #   volumes:
-  #     - database_data:/var/lib/postgresql/data
 
   api:
     build:

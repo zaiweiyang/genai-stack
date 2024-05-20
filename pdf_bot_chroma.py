@@ -387,6 +387,7 @@ def main():
         st.markdown(f"### [Tracing the execution]({phoenix_tracing_endpoint})")
 
         manage_backups()
+        upload_status = load_status()
 
     with col2:
         # st.subheader("Previously uploaded PDFs:")

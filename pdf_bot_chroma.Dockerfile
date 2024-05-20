@@ -13,6 +13,8 @@ COPY requirements.txt .
 
 RUN pip install --upgrade -r requirements.txt
 RUN pip install arize-phoenix[evals]
+# RUN mkdir -p /app/data
+# RUN mkdir -p /app/data_backups
 
 COPY pdf_bot_chroma.py .
 COPY utils.py .

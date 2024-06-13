@@ -21,5 +21,5 @@ sudo rm -rf ../chroma-data
 # 6. - $PWD/backups_chroma:/backups
 sudo rm -rf ../backups_chroma
 
-sudo rm -rf ~/.docker
-sudo systemctl restart docker 
+# sudo rm -rf ~/.docker
+# sudo systemctl restart docker 

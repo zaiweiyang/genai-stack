@@ -21,3 +21,4 @@ Flask
 requests
 langchain-chroma
 chroma
+cassandra-driver

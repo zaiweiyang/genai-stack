@@ -4,4 +4,5 @@
 !images/*
 !front-end/*
 !scripts/*
+!cassandra/*
 front-end/node_modules/*

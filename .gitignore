@@ -7,3 +7,4 @@ app_data/
 app_data_backups/
 chroma-data/
 backups/
+cassandra-data/

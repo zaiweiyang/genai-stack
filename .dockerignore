@@ -5,4 +5,6 @@
 !front-end/*
 !scripts/*
 !cassandra/*
+!grpc-svr/*
+!config/*
 front-end/node_modules/*

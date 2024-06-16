@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package file_service;
+
+service FileService {
+  rpc ListFiles (DirectoryRequest) returns (FileList);
+  rpc GetFile (FileRequest) returns (FileContent);
+}
+
+message DirectoryRequest {
+  string directory_path = 1;
+}
+
+message FileRequest {
+  string file_path = 1;
+}
+
+message FileList {
+  repeated string files = 1;
+}
+
+message FileContent {
+  bytes content = 1;
+}

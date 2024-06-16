@@ -1,9 +1,11 @@
-
 import os
 import json
+import grpc
+import file_service_pb2
+import file_service_pb2_grpc
+import requests
 import subprocess
 import datetime
-import requests
 import threading
 import concurrent.futures
 from cassandra.cluster import Cluster
@@ -14,6 +16,7 @@ from langchain.chains import RetrievalQA
 from PyPDF2 import PdfReader
 from docx import Document as DocxDocument
 from pptx import Presentation
+import io
 from langchain.callbacks.base import BaseCallbackHandler
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Neo4jVector
@@ -28,6 +31,10 @@ from chains import (
 
 import phoenix as px
 from phoenix.trace.langchain import LangChainInstrumentor
+import logging
+logging.basicConfig(level=logging.INFO)
+
+import openai
 
 # session = px.launch_app()
 # set_global_handler("arize_phoenix")
@@ -55,6 +62,7 @@ embedding_model_name = os.getenv("EMBEDDING_MODEL")
 llm_name = os.getenv("LLM")
 backup_api_svc_url = os.getenv("BACKUP_API_SVC_URL")
 phoenix_tracing_endpoint = os.getenv("PHOENIX_COLLECTOR_ENDPOINT")
+grpc_server_url = os.getenv("GRPC_SERVER_URL", "host.docker.internal:50051")
 
 # Cassandra connection details
 cassandra_host = os.getenv("CASSANDRA_HOST")
@@ -62,6 +70,8 @@ cassandra_username = os.getenv("CASSANDRA_USERNAME")
 cassandra_password = os.getenv("CASSANDRA_PASSWORD")
 
 # Connect to Cassandra
+logging.info(f"cassandra_host: {cassandra_host}")
+
 auth_provider = PlainTextAuthProvider(username=cassandra_username, password=cassandra_password)
 cluster = Cluster([cassandra_host], auth_provider=auth_provider)
 session = cluster.connect()
@@ -152,6 +162,11 @@ llm = load_llm(llm_name, logger=logger, config={"ollama_base_url": ollama_base_u
 # Status file path
 status_file_path = '/app/data/upload_status.json'
 
+def escape_quotes(text):
+    if text is not None:
+        return text.replace("'", "''")
+    return text
+
 def summarize_text_with_ollama(text):
     # Use Ollama for summarization
     response = requests.post(
@@ -165,65 +180,101 @@ def summarize_text_with_ollama(text):
         logger.error(f"Failed to summarize text with Ollama: {response.status_code} - {response.text}")
         return "No summary available"
 
+def summarize_text_with_openai(text):
+    client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    try:
+        openai_model= os.getenv("ChatGPT_Model","gpt-4o")
+
+        logger.info(f"OpenAI Model: {openai_model}")
+        response = client.chat.completions.create(
+            model=openai_model,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": f"Summarize the following text:\n\n{text}"}
+            ],
+            max_tokens=2300,
+            stop=None,
+            temperature=0.5,
+            top_p=0.9
+        )
+        # logger.info(f"Response from OpenAI: {response}")
+        summary = response.choices[0].message.content.strip()
+        return summary
+    except Exception as e:
+        logger.error(f"Failed to summarize text with OpenAI: {str(e)}")
+        return "None"
+
 def store_metadata_in_cassandra(doc_id, title, abstract, summary, uploaded_to, file_type, file_name):
+    title = escape_quotes(title)
+    abstract = escape_quotes(abstract)
+    summary = escape_quotes(summary)
+    uploaded_to = escape_quotes(uploaded_to)
+    file_type = escape_quotes(file_type)
+    file_name = escape_quotes(file_name)
+    
     session.execute("""
         INSERT INTO documents.summaries (id, title, abstract, summary, uploaded_to, file_type, file_name)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
     """, (doc_id, title, abstract, summary, uploaded_to, file_type, file_name))
 
-def handle_pdf_upload(pdf, upload_status, save_to_chroma, save_to_neo4j):
-    pdf_reader = PdfReader(pdf)
-    title = pdf_reader.metadata.get('/Title', "No Title Available") if pdf_reader.metadata else "No Metadata Found"
-    text = "".join((page.extract_text() or "") for page in pdf_reader.pages)
-    abstract = text[:500]  # First 500 characters as an abstract
-    summary = summarize_text_with_ollama(text)  # Generate summary with Ollama
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200, length_function=len)
-    chunks = text_splitter.split_text(text=text)
-    logger.info(f"{len(chunks)} chunks are generated from the pdf <{pdf.name}>.")
-        
-    if pdf.name not in upload_status:
-        upload_status[pdf.name] = {"title": title, "abstract": abstract, "summary": summary, "uploaded_to": []}
+def escape_quotes(text):
+    if text is not None:
+        return text.replace("'", "''")
+    return text
 
-    ids = [str(uuid.uuid5(NAMESPACE_UUID, chunk)) for chunk in chunks]
-    unique_ids = list(set(ids))
-    seen_ids = set()
-    unique_chunks = [chunk for chunk, id in zip(chunks, ids) if id not in seen_ids and (seen_ids.add(id) or True)]
-
-    if save_to_chroma:
-        logger.info(f"{len(unique_chunks)} unique chunks saved to Chroma")
-        chroma_db = Chroma.from_texts(texts=unique_chunks, embedding=embeddings,ids=unique_ids, persist_directory="/data", collection_name="pdf_bot")
-        chroma_db.persist()
-        upload_status[pdf.name]['uploaded_to'].append('Chroma')
-
-    if save_to_neo4j:
-        logger.info(f"{len(unique_chunks)} unique chunks saved to Neo4j")
-        vectorstore = Neo4jVector.from_texts(
-            chunks,
-            url=url,
-            username=username,
-            password=password,
-            embedding=embeddings,
-            ids=unique_ids,
-            index_name="pdf_bot",
-            node_label="PdfBotChunk"
-        )
-        upload_status[pdf.name]['uploaded_to'].append('Neo4j')
+def store_metadata_in_cassandra(doc_id, title, abstract, summary, uploaded_to, file_type, file_name):
+    title = escape_quotes(title)
+    abstract = escape_quotes(abstract)
+    summary = escape_quotes(summary)
+    uploaded_to = escape_quotes(uploaded_to)
+    file_type = escape_quotes(file_type)
+    file_name = escape_quotes(file_name)
     
-    store_metadata_in_cassandra(uuid.uuid4(), title, abstract, summary, ','.join(upload_status[pdf.name]['uploaded_to']), 'pdf', pdf.name)
-    save_status(upload_status)
+    session.execute("""
+        INSERT INTO documents.summaries (id, title, abstract, summary, uploaded_to, file_type, file_name)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+    """, (doc_id, title, abstract, summary, uploaded_to, file_type, file_name))
 
-def handle_docx_upload(docx, upload_status, save_to_chroma, save_to_neo4j):
-    docx_document = DocxDocument(docx)
-    text = "\n\n".join([paragraph.text for paragraph in docx_document.paragraphs])
-    title = docx.name
+def download_file(file_path):
+    channel = grpc.insecure_channel(grpc_server_url)
+    stub = file_service_pb2_grpc.FileServiceStub(channel)
+
+    response = stub.GetFile(file_service_pb2.FileRequest(file_path=file_path))
+    return response.content
+
+def handle_file_upload(file_content, file_name, upload_status, save_to_chroma, save_to_neo4j, file_type):
+    if file_type == 'pdf':
+        file_like_object = io.BytesIO(file_content)
+        pdf_reader = PdfReader(file_like_object)
+        title = pdf_reader.metadata.get('/Title', "No Title Available") if pdf_reader.metadata else "No Metadata Found"
+        text = "".join((page.extract_text() or "") for page in pdf_reader.pages)
+    elif file_type == 'docx':
+        file_like_object = io.BytesIO(file_content)
+        docx_document = DocxDocument(file_like_object)
+        text = "\n\n".join([paragraph.text for paragraph in docx_document.paragraphs])
+        title = file_name
+    elif file_type == 'pptx':
+        file_like_object = io.BytesIO(file_content)
+        pptx_document = Presentation(file_like_object)
+        text = "\n\n".join([shape.text for slide in pptx_document.slides for shape in slide.shapes if hasattr(shape, "text")])
+        title = file_name
+    elif file_type == 'txt':
+        text = file_content.decode("utf-8")
+        title = file_name
+
     abstract = text[:500]  # First 500 characters as an abstract
-    summary = summarize_text_with_ollama(text)  # Generate summary with Ollama
+    # logger.info(f">>>Input Text Ollama for summary <{text}>.")
+    summary = summarize_text_with_openai(text)  # Generate summary with Ollama
+    # if summary != "None":
+    #     abstract = summary
+    logger.info(f"<<<Got document summary <{summary}>.")
+
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200, length_function=len)
     chunks = text_splitter.split_text(text=text)
-    logger.info(f"{len(chunks)} chunks are generated from the docx <{docx.name}>.")
+    logger.info(f"{len(chunks)} chunks are generated from the {file_type} <{file_name}>.")
 
-    if docx.name not in upload_status:
-        upload_status[docx.name] = {"title": title, "abstract": abstract, "summary": summary, "uploaded_to": []}
+    if file_name not in upload_status:
+        upload_status[file_name] = {"title": title, "abstract": abstract, "summary": summary, "uploaded_to": []}
 
     ids = [str(uuid.uuid5(NAMESPACE_UUID, chunk)) for chunk in chunks]
     unique_ids = list(set(ids))
@@ -232,9 +283,9 @@ def handle_docx_upload(docx, upload_status, save_to_chroma, save_to_neo4j):
 
     if save_to_chroma:
         logger.info(f"{len(unique_chunks)} unique chunks saved to Chroma")
-        chroma_db = Chroma.from_texts(texts=unique_chunks, embedding=embeddings, ids=unique_ids, persist_directory="/data", collection_name="docx_bot")
+        chroma_db = Chroma.from_texts(texts=unique_chunks, embedding=embeddings, ids=unique_ids, persist_directory="/data", collection_name=f"{file_type}_bot")
         chroma_db.persist()
-        upload_status[docx.name]['uploaded_to'].append('Chroma')
+        upload_status[file_name]['uploaded_to'].append('Chroma')
 
     if save_to_neo4j:
         logger.info(f"{len(unique_chunks)} unique chunks saved to Neo4j")
@@ -245,114 +296,32 @@ def handle_docx_upload(docx, upload_status, save_to_chroma, save_to_neo4j):
             password=password,
             embedding=embeddings,
             ids=unique_ids,
-            index_name="docx_bot",
-            node_label="DocxBotChunk"
+            index_name=f"{file_type}_bot",
+            node_label=f"{file_type.capitalize()}BotChunk"
         )
-        upload_status[docx.name]['uploaded_to'].append('Neo4j')
+        upload_status[file_name]['uploaded_to'].append('Neo4j')
 
-    store_metadata_in_cassandra(uuid.uuid4(), title, abstract, summary, ','.join(upload_status[docx.name]['uploaded_to']), 'docx', docx.name)
-    save_status(upload_status)
-
-def handle_pptx_upload(pptx, upload_status, save_to_chroma, save_to_neo4j):
-    pptx_document = Presentation(pptx)
-    text = "\n\n".join([shape.text for slide in pptx_document.slides for shape in slide.shapes if hasattr(shape, "text")])
-    title = pptx.name
-    abstract = text[:500]  # First 500 characters as an abstract
-    summary = summarize_text_with_ollama(text)  # Generate summary with Ollama
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200, length_function=len)
-    chunks = text_splitter.split_text(text=text)
-    logger.info(f"{len(chunks)} chunks are generated from the pptx <{pptx.name}>.")
-
-    if pptx.name not in upload_status:
-        upload_status[pptx.name] = {"title": title, "abstract": abstract, "summary": summary, "uploaded_to": []}
-
-    ids = [str(uuid.uuid5(NAMESPACE_UUID, chunk)) for chunk in chunks]
-    unique_ids = list(set(ids))
-    seen_ids = set()
-    unique_chunks = [chunk for chunk, id in zip(chunks, ids) if id not in seen_ids and (seen_ids.add(id) or True)]
-
-    if save_to_chroma:
-        logger.info(f"{len(unique_chunks)} unique chunks saved to Chroma")
-        chroma_db = Chroma.from_texts(texts=unique_chunks, embedding=embeddings, ids=unique_ids, persist_directory="/data", collection_name="pptx_bot")
-        chroma_db.persist()
-        upload_status[pptx.name]['uploaded_to'].append('Chroma')
-
-    if save_to_neo4j:
-        logger.info(f"{len(unique_chunks)} unique chunks saved to Neo4j")
-        vectorstore = Neo4jVector.from_texts(
-            chunks,
-            url=url,
-            username=username,
-            password=password,
-            embedding=embeddings,
-            ids=unique_ids,
-            index_name="pptx_bot",
-            node_label="PptxBotChunk"
-        )
-        upload_status[pptx.name]['uploaded_to'].append('Neo4j')
-
-    store_metadata_in_cassandra(uuid.uuid4(), title, abstract, summary, ','.join(upload_status[pptx.name]['uploaded_to']), 'pptx', pptx.name)
-    save_status(upload_status)
-
-def handle_txt_upload(txt, upload_status, save_to_chroma, save_to_neo4j):
-    text = txt.read().decode("utf-8")
-    title = txt.name
-    abstract = text[:500]  # First 500 characters as an abstract
-    summary = summarize_text_with_ollama(text)  # Generate summary with Ollama
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200, length_function=len)
-    chunks = text_splitter.split_text(text=text)
-    logger.info(f"{len(chunks)} chunks are generated from the txt <{txt.name}>.")
-
-    if txt.name not in upload_status:
-        upload_status[txt.name] = {"title": title, "abstract": abstract, "summary": summary, "uploaded_to": []}
-
-    ids = [str(uuid.uuid5(NAMESPACE_UUID, chunk)) for chunk in chunks]
-    unique_ids = list(set(ids))
-    seen_ids = set()
-    unique_chunks = [chunk for chunk, id in zip(chunks, ids) if id not in seen_ids and (seen_ids.add(id) or True)]
-
-    if save_to_chroma:
-        logger.info(f"{len(unique_chunks)} unique chunks saved to Chroma")
-        chroma_db = Chroma.from_texts(texts=unique_chunks, embedding=embeddings, ids=unique_ids, persist_directory="/data", collection_name="txt_bot")
-        chroma_db.persist()
-        upload_status[txt.name]['uploaded_to'].append('Chroma')
-
-    if save_to_neo4j:
-        logger.info(f"{len(unique_chunks)} unique chunks saved to Neo4j")
-        vectorstore = Neo4jVector.from_texts(
-            chunks,
-            url=url,
-            username=username,
-            password=password,
-            embedding=embeddings,
-            ids=unique_ids,
-            index_name="txt_bot",
-            node_label="TxtBotChunk"
-        )
-        upload_status[txt.name]['uploaded_to'].append('Neo4j')
-
-    store_metadata_in_cassandra(uuid.uuid4(), title, abstract, summary, ','.join(upload_status[txt.name]['uploaded_to']), 'txt', txt.name)
+    store_metadata_in_cassandra(uuid.uuid4(), title, abstract, summary, ','.join(upload_status[file_name]['uploaded_to']), file_type, file_name)
     save_status(upload_status)
 
 def scan_directories(directories, upload_status, save_to_chroma, save_to_neo4j):
+    channel = grpc.insecure_channel(grpc_server_url)
+    stub = file_service_pb2_grpc.FileServiceStub(channel)
+
     for directory in directories:
-        for root, _, files in os.walk(directory):
-            for file in files:
-                file_path = os.path.join(root, file)
-                ext = os.path.splitext(file)[1].lower()
-                with open(file_path, 'rb') as f:
-                    if ext == '.pdf':
-                        handle_pdf_upload(f, upload_status, save_to_chroma, save_to_neo4j)
-                    elif ext == '.docx':
-                        handle_docx_upload(f, upload_status, save_to_chroma, save_to_neo4j)
-                    elif ext == '.pptx':
-                        handle_pptx_upload(f, upload_status, save_to_chroma, save_to_neo4j)
-                    elif ext == '.txt':
-                        handle_txt_upload(f, upload_status, save_to_chroma, save_to_neo4j)
+        response = stub.ListFiles(file_service_pb2.DirectoryRequest(directory_path=directory))
+        for file_name in response.files:
+            file_path = os.path.join(directory, file_name)
+            file_content = download_file(file_path)
+            file_type = os.path.splitext(file_name)[1][1:]  # Get the file extension
+            handle_file_upload(file_content, file_name, upload_status, save_to_chroma, save_to_neo4j, file_type)
 
 def load_config():
-    with open('config.json', 'r') as file:
-        return json.load(file)
+    config_path = './config.json'
+    with open(config_path, 'r') as file:
+        config = json.load(file)
+    
+    return config.get('directories', [])
 
 def display_uploaded_pdfs(upload_status):
     st.subheader("Previously uploaded documents:")
@@ -440,7 +409,7 @@ def save_status(status):
 def get_backup_tags():
     try:
         response = requests.get(f'{backup_api_svc_url}/backups')
-        if response.status_code == 200:
+        if (response.status_code == 200):
             backup_tags = response.json()
             return backup_tags
         else:
@@ -483,7 +452,7 @@ def backup_database(tag=None):
     response = requests.post(f'{backup_api_svc_url}/backup', json=data)
 
     operation_in_progress = False
-    if response.status_code == 200):
+    if (response.status_code == 200):
         return response.json()
     else:
         return {"message": f"Backup failed with status {response.status_code}: {response.text}"}
@@ -494,7 +463,7 @@ def restore_database(tag):
     data = {"tag": tag}
     response = requests.post(f'{backup_api_svc_url}/restore', json=data)
     operation_in_progress = False
-    if response.status_code == 200):
+    if (response.status_code == 200):
         return response.json()
     else:
         return {"message": f"Restore failed with status {response.status_code}: {response.text}"}
@@ -504,8 +473,8 @@ def main():
 
     st.header("📄Demo: Generative AI enriched with local data. \nLocally hosted LLM Model and local Knowledge Base generated from documents.")
 
-    config = load_config()
-    directories = config.get('directories', [])
+    directories = load_config()
+    logging.info(f"loaded directories: {directories}")
     upload_status = load_status()
 
     col1, col2 = st.columns([3, 1])
@@ -522,19 +491,19 @@ def main():
         if not operation_in_progress:
             pdf = st.file_uploader("Upload your PDF", type="pdf")
             if pdf and pdf.name not in upload_status:
-                handle_pdf_upload(pdf, upload_status, save_to_chroma,save_to_neo4j )
+                handle_file_upload(pdf, pdf.name, upload_status, save_to_chroma, save_to_neo4j, 'pdf')
 
             docx = st.file_uploader("Upload your DOCX", type="docx")
             if docx and docx.name not in upload_status:
-                handle_docx_upload(docx, upload_status, save_to_chroma, save_to_neo4j)
+                handle_file_upload(docx, docx.name, upload_status, save_to_chroma, save_to_neo4j, 'docx')
 
             pptx = st.file_uploader("Upload your PPTX", type="pptx")
             if pptx and pptx.name not in upload_status:
-                handle_pptx_upload(pptx, upload_status, save_to_chroma, save_to_neo4j)
+                handle_file_upload(pptx, pptx.name, upload_status, save_to_chroma, save_to_neo4j, 'pptx')
 
             txt = st.file_uploader("Upload your TXT", type="txt")
             if txt and txt.name not in upload_status:
-                handle_txt_upload(txt, upload_status, save_to_chroma, save_to_neo4j)
+                handle_file_upload(txt, txt.name, upload_status, save_to_chroma, save_to_neo4j, 'txt')
 
         if upload_status:       
             st.success("Uploaded documents: " + ', '.join(upload_status.keys()))

@@ -4,7 +4,6 @@ import grpc
 import file_service_pb2
 import file_service_pb2_grpc
 import requests
-import subprocess
 import datetime
 import threading
 import concurrent.futures
@@ -44,7 +43,7 @@ from dotenv import load_dotenv
 # from custom_widgets.layout import Accordion
 
 # from langchain.vectorstores import Chroma
-from langchain_community.vectorstores import  Chroma
+from langchain_community.vectorstores import Chroma
 
 import uuid
 NAMESPACE_UUID = uuid.uuid4()
@@ -69,8 +68,8 @@ cassandra_host = os.getenv("CASSANDRA_HOST")
 cassandra_username = os.getenv("CASSANDRA_USERNAME")
 cassandra_password = os.getenv("CASSANDRA_PASSWORD")
 
-# Connect to Cassandra
-logging.info(f"cassandra_host: {cassandra_host}")
+# # Connect to Cassandra
+# logging.info(f"cassandra_host: {cassandra_host}")
 
 auth_provider = PlainTextAuthProvider(username=cassandra_username, password=cassandra_password)
 cluster = Cluster([cassandra_host], auth_provider=auth_provider)
@@ -130,7 +129,7 @@ class StreamHandler(BaseCallbackHandler):
         self.text = ""
         self.lock = threading.Lock()
         self.llm_accordion = Accordion(label=f"**{name} LLM Answer**")
-        self.retriever_accordion = Accordion(label=f"**{name} Retriever Output**",expanded = False)
+        self.retriever_accordion = Accordion(label=f"**{name} Retriever Output**", expanded=False)
         self.retriever_text = ""
         self.llm_accordion.update()
         self.retriever_accordion.update()
@@ -147,43 +146,27 @@ class StreamHandler(BaseCallbackHandler):
             for idx, doc in enumerate(documents):
                 self.retriever_text += f"\n\n**Results from Document[{idx}]:**\n\n"
                 self.retriever_text += doc.page_content
-                document_detail += json.dumps(doc.metadata, indent=2) 
+                document_detail += json.dumps(doc.metadata, indent=2)
                 self.retriever_accordion.markdown(self.retriever_text)
 
     def on_chain_end(self, outputs, **kwargs):
         with self.lock:
             if self.retriever_text == "":
-                self.chain_text +=json.dumps(outputs, indent=2) 
-                self.chain_text +=f"\n\n"
+                self.chain_text += json.dumps(outputs, indent=2)
+                self.chain_text += f"\n\n"
                 self.retriever_accordion.markdown(self.chain_text)
 
 llm = load_llm(llm_name, logger=logger, config={"ollama_base_url": ollama_base_url})
-
-# Status file path
-status_file_path = '/app/data/upload_status.json'
 
 def escape_quotes(text):
     if text is not None:
         return text.replace("'", "''")
     return text
 
-def summarize_text_with_ollama(text):
-    # Use Ollama for summarization
-    response = requests.post(
-        f"{ollama_base_url}/summarize",
-        json={"text": text},
-    )
-    if response.status_code == 200:
-        summary = response.json().get("summary", "")
-        return summary
-    else:
-        logger.error(f"Failed to summarize text with Ollama: {response.status_code} - {response.text}")
-        return "No summary available"
-
 def summarize_text_with_openai(text):
     client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     try:
-        openai_model= os.getenv("ChatGPT_Model","gpt-4o")
+        openai_model = os.getenv("CHATGPT_MODEL", "gpt-4")
 
         logger.info(f"OpenAI Model: {openai_model}")
         response = client.chat.completions.create(
@@ -197,43 +180,42 @@ def summarize_text_with_openai(text):
             temperature=0.5,
             top_p=0.9
         )
-        # logger.info(f"Response from OpenAI: {response}")
         summary = response.choices[0].message.content.strip()
         return summary
     except Exception as e:
         logger.error(f"Failed to summarize text with OpenAI: {str(e)}")
         return "None"
 
+# Keep the latest record only and remove other duplicated records with the same file_name from the database.
 def store_metadata_in_cassandra(doc_id, title, abstract, summary, uploaded_to, file_type, file_name):
-    title = escape_quotes(title)
-    abstract = escape_quotes(abstract)
-    summary = escape_quotes(summary)
-    uploaded_to = escape_quotes(uploaded_to)
-    file_type = escape_quotes(file_type)
-    file_name = escape_quotes(file_name)
-    
-    session.execute("""
-        INSERT INTO documents.summaries (id, title, abstract, summary, uploaded_to, file_type, file_name)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-    """, (doc_id, title, abstract, summary, uploaded_to, file_type, file_name))
+    try:
+        title = escape_quotes(title)
+        abstract = escape_quotes(abstract)
+        summary = escape_quotes(summary)
+        uploaded_to = escape_quotes(uploaded_to)
+        file_type = escape_quotes(file_type)
+        file_name = escape_quotes(file_name)
 
-def escape_quotes(text):
-    if text is not None:
-        return text.replace("'", "''")
-    return text
+        # Select existing records with the same file_name
+        rows = session.execute("""
+            SELECT id FROM documents.summaries WHERE file_name = %s ALLOW FILTERING
+        """, (file_name,))
 
-def store_metadata_in_cassandra(doc_id, title, abstract, summary, uploaded_to, file_type, file_name):
-    title = escape_quotes(title)
-    abstract = escape_quotes(abstract)
-    summary = escape_quotes(summary)
-    uploaded_to = escape_quotes(uploaded_to)
-    file_type = escape_quotes(file_type)
-    file_name = escape_quotes(file_name)
-    
-    session.execute("""
-        INSERT INTO documents.summaries (id, title, abstract, summary, uploaded_to, file_type, file_name)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-    """, (doc_id, title, abstract, summary, uploaded_to, file_type, file_name))
+        # Delete each selected record using the full primary key
+        for row in rows:
+            session.execute("""
+                DELETE FROM documents.summaries WHERE id = %s
+            """, (row.id,))
+
+        # Insert the new record
+        session.execute("""
+            INSERT INTO documents.summaries (id, title, abstract, summary, uploaded_to, file_type, file_name)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (doc_id, title, abstract, summary, uploaded_to, file_type, file_name))
+
+    except Exception as e:
+        logger.error(f"Store metadata in cassandra error: {e}")
+        return []
 
 def download_file(file_path):
     channel = grpc.insecure_channel(grpc_server_url)
@@ -242,7 +224,7 @@ def download_file(file_path):
     response = stub.GetFile(file_service_pb2.FileRequest(file_path=file_path))
     return response.content
 
-def handle_file_upload(file_content, file_name, upload_status, save_to_chroma, save_to_neo4j, file_type):
+def handle_file_upload(file_content, file_name, save_to_chroma, save_to_neo4j, file_type):
     if file_type == 'pdf':
         file_like_object = io.BytesIO(file_content)
         pdf_reader = PdfReader(file_like_object)
@@ -263,29 +245,24 @@ def handle_file_upload(file_content, file_name, upload_status, save_to_chroma, s
         title = file_name
 
     abstract = text[:500]  # First 500 characters as an abstract
-    # logger.info(f">>>Input Text Ollama for summary <{text}>.")
-    summary = summarize_text_with_openai(text)  # Generate summary with Ollama
-    # if summary != "None":
-    #     abstract = summary
+    summary = summarize_text_with_openai(text)  # Generate summary with OpenAI
     logger.info(f"<<<Got document summary <{summary}>.")
 
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200, length_function=len)
     chunks = text_splitter.split_text(text=text)
     logger.info(f"{len(chunks)} chunks are generated from the {file_type} <{file_name}>.")
 
-    if file_name not in upload_status:
-        upload_status[file_name] = {"title": title, "abstract": abstract, "summary": summary, "uploaded_to": []}
-
     ids = [str(uuid.uuid5(NAMESPACE_UUID, chunk)) for chunk in chunks]
     unique_ids = list(set(ids))
     seen_ids = set()
     unique_chunks = [chunk for chunk, id in zip(chunks, ids) if id not in seen_ids and (seen_ids.add(id) or True)]
 
+    uploaded_to = []
     if save_to_chroma:
         logger.info(f"{len(unique_chunks)} unique chunks saved to Chroma")
         chroma_db = Chroma.from_texts(texts=unique_chunks, embedding=embeddings, ids=unique_ids, persist_directory="/data", collection_name=f"{file_type}_bot")
         chroma_db.persist()
-        upload_status[file_name]['uploaded_to'].append('Chroma')
+        uploaded_to.append('Chroma')
 
     if save_to_neo4j:
         logger.info(f"{len(unique_chunks)} unique chunks saved to Neo4j")
@@ -299,12 +276,11 @@ def handle_file_upload(file_content, file_name, upload_status, save_to_chroma, s
             index_name=f"{file_type}_bot",
             node_label=f"{file_type.capitalize()}BotChunk"
         )
-        upload_status[file_name]['uploaded_to'].append('Neo4j')
+        uploaded_to.append('Neo4j')
 
-    store_metadata_in_cassandra(uuid.uuid4(), title, abstract, summary, ','.join(upload_status[file_name]['uploaded_to']), file_type, file_name)
-    save_status(upload_status)
+    store_metadata_in_cassandra(uuid.uuid4(), title, abstract, summary, ','.join(uploaded_to), file_type, file_name)
 
-def scan_directories(directories, upload_status, save_to_chroma, save_to_neo4j):
+def scan_directories(directories, save_to_chroma, save_to_neo4j):
     channel = grpc.insecure_channel(grpc_server_url)
     stub = file_service_pb2_grpc.FileServiceStub(channel)
 
@@ -314,7 +290,7 @@ def scan_directories(directories, upload_status, save_to_chroma, save_to_neo4j):
             file_path = os.path.join(directory, file_name)
             file_content = download_file(file_path)
             file_type = os.path.splitext(file_name)[1][1:]  # Get the file extension
-            handle_file_upload(file_content, file_name, upload_status, save_to_chroma, save_to_neo4j, file_type)
+            handle_file_upload(file_content, file_name, save_to_chroma, save_to_neo4j, file_type)
 
 def load_config():
     config_path = './config.json'
@@ -323,13 +299,14 @@ def load_config():
     
     return config.get('directories', [])
 
-def display_uploaded_pdfs(upload_status):
+def display_uploaded_pdfs():
     st.subheader("Previously uploaded documents:")
-    for doc_name, info in upload_status.items():
-        uploaded_to = ', '.join(set(info.get('uploaded_to', ['Neo4j']))) 
-        st.markdown(f"**{doc_name}** - Title: {info['title']}, Abstract: {info['abstract'][:150]}... (Uploaded to: {uploaded_to})")
+    rows = session.execute("SELECT file_name, title, abstract, uploaded_to FROM documents.summaries")
+    for row in rows:
+        uploaded_to = ', '.join(set(row.uploaded_to.split(',')))
+        st.markdown(f"**{row.file_name}** - Title: {row.title}, Abstract: {row.abstract[:150]}... (Uploaded to: {uploaded_to})")
 
-def run_qa_section(upload_status):
+def run_qa_section():
     st.header("Document Query Assistant")
     
     col1, col2 = st.columns(2)
@@ -394,29 +371,17 @@ def run_qa_section(upload_status):
         else:
             st.markdown("### No Database is selected for the query")
 
-def load_status():
-    global status_file_path
-    if os.path.exists(status_file_path):
-        with open(status_file_path, 'r') as file:
-            return json.load(file)
-    return {}
-
-def save_status(status):
-    global status_file_path
-    with open(status_file_path, 'w') as file:
-        json.dump(status, file)
-
 def get_backup_tags():
     try:
         response = requests.get(f'{backup_api_svc_url}/backups')
-        if (response.status_code == 200):
+        if response.status_code == 200:
             backup_tags = response.json()
             return backup_tags
         else:
-            print(f"Failed to retrieve backup tags: {response.status_code} {response.text}")
+            logger.error(f"Failed to retrieve backup tags: {response.status_code} {response.text}")
             return []
     except Exception as e:
-        print(f"Error retrieving backup tags: {e}")
+        logger.error(f"Error retrieving backup tags: {e}")
         return []
 
 def manage_backups():
@@ -438,7 +403,6 @@ def manage_backups():
                 st.text(message)
                 
     with col2:
-        backup_tags = get_backup_tags()
         tag = st.selectbox('Choose a tag to restore from:', backup_tags, key='restore_tag', disabled=operation_in_progress)
         if st.button('Restore Database', key='restore_button', disabled=operation_in_progress):
             response = restore_database(tag)
@@ -452,7 +416,7 @@ def backup_database(tag=None):
     response = requests.post(f'{backup_api_svc_url}/backup', json=data)
 
     operation_in_progress = False
-    if (response.status_code == 200):
+    if response.status_code == 200:
         return response.json()
     else:
         return {"message": f"Backup failed with status {response.status_code}: {response.text}"}
@@ -463,7 +427,7 @@ def restore_database(tag):
     data = {"tag": tag}
     response = requests.post(f'{backup_api_svc_url}/restore', json=data)
     operation_in_progress = False
-    if (response.status_code == 200):
+    if response.status_code == 200:
         return response.json()
     else:
         return {"message": f"Restore failed with status {response.status_code}: {response.text}"}
@@ -475,7 +439,6 @@ def main():
 
     directories = load_config()
     logging.info(f"loaded directories: {directories}")
-    upload_status = load_status()
 
     col1, col2 = st.columns([3, 1])
 
@@ -490,37 +453,32 @@ def main():
         
         if not operation_in_progress:
             pdf = st.file_uploader("Upload your PDF", type="pdf")
-            if pdf and pdf.name not in upload_status:
-                handle_file_upload(pdf, pdf.name, upload_status, save_to_chroma, save_to_neo4j, 'pdf')
+            if pdf:
+                handle_file_upload(pdf.read(), pdf.name, save_to_chroma, save_to_neo4j, 'pdf')
 
             docx = st.file_uploader("Upload your DOCX", type="docx")
-            if docx and docx.name not in upload_status:
-                handle_file_upload(docx, docx.name, upload_status, save_to_chroma, save_to_neo4j, 'docx')
+            if docx:
+                handle_file_upload(docx.read(), docx.name, save_to_chroma, save_to_neo4j, 'docx')
 
             pptx = st.file_uploader("Upload your PPTX", type="pptx")
-            if pptx and pptx.name not in upload_status:
-                handle_file_upload(pptx, pptx.name, upload_status, save_to_chroma, save_to_neo4j, 'pptx')
+            if pptx:
+                handle_file_upload(pptx.read(), pptx.name, save_to_chroma, save_to_neo4j, 'pptx')
 
             txt = st.file_uploader("Upload your TXT", type="txt")
-            if txt and txt.name not in upload_status:
-                handle_file_upload(txt, txt.name, upload_status, save_to_chroma, save_to_neo4j, 'txt')
-
-        if upload_status:       
-            st.success("Uploaded documents: " + ', '.join(upload_status.keys()))
+            if txt:
+                handle_file_upload(txt.read(), txt.name, save_to_chroma, save_to_neo4j, 'txt')
 
         if not operation_in_progress:
-            run_qa_section(upload_status) 
+            run_qa_section() 
         
         st.markdown(f"### [Tracing the execution]({phoenix_tracing_endpoint})")
 
         manage_backups()
-        upload_status = load_status()
 
     with col2:
-        if upload_status:
-            display_uploaded_pdfs(upload_status)
+        display_uploaded_pdfs()
 
-    scan_directories(directories, upload_status, save_to_chroma, save_to_neo4j)
+    scan_directories(directories, save_to_chroma, save_to_neo4j)
 
 if __name__ == "__main__":
     main()
